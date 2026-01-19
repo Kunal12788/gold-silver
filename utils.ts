@@ -38,6 +38,20 @@ export const downloadCSV = (csvContent: string, filename: string) => {
   }
 };
 
+export const fileToBase64 = (file: File): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = () => {
+      const result = reader.result as string;
+      // Remove the Data-URL declaration (e.g., "data:application/pdf;base64,")
+      const base64 = result.split(',')[1];
+      resolve(base64);
+    };
+    reader.onerror = error => reject(error);
+  });
+};
+
 /**
  * Calculates the inventory state (Quantity and Value) on a specific historical date.
  * Returns an object with grams and value.

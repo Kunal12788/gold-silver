@@ -3,8 +3,8 @@ import React, { useState, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { GoogleGenAI, Type } from "@google/genai";
 import { Invoice, TransactionType } from '../types';
-import { generateId, parseInvoiceOCR } from '../utils';
-import { CheckCircle, AlertTriangle, ScanLine, Calculator, RefreshCw, ArrowRightLeft, Lock, Loader2, Sparkles, X, Unlock, ShieldAlert } from 'lucide-react';
+import { generateId, parseInvoiceOCR, fileToBase64 } from '../utils';
+import { CheckCircle, AlertTriangle, ScanLine, Calculator, RefreshCw, ArrowRightLeft, Lock, Loader2, Sparkles, X, Unlock, ShieldAlert, UploadCloud, FileText } from 'lucide-react';
 import { SingleDatePicker } from './SingleDatePicker';
 
 interface InvoiceFormProps {
@@ -23,7 +23,8 @@ const InvoiceForm: React.FC<InvoiceFormProps> = ({ onAdd, currentStock, lockDate
   const [authError, setAuthError] = useState('');
 
   const [mode, setMode] = useState<'MANUAL' | 'UPLOAD'>('MANUAL');
-  const [ocrText, setOcrText] = useState('');
+  const [ocrText, setOcrText] = useState(''); // Kept for fallback manual paste if needed, though hidden in UI
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   
   const [formData, setFormData] = useState({
@@ -61,15 +62,47 @@ const InvoiceForm: React.FC<InvoiceFormProps> = ({ onAdd, currentStock, lockDate
       }
   };
 
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+      if (e.target.files && e.target.files[0]) {
+          setSelectedFile(e.target.files[0]);
+          setError('');
+      }
+  };
+
   const handleOcrProcess = async () => {
-      if (!ocrText.trim()) return;
+      if (!selectedFile) {
+          setError("Please upload a PDF or Image invoice.");
+          return;
+      }
       setIsProcessing(true);
       setError('');
       try {
+          const base64Data = await fileToBase64(selectedFile);
           const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+          
+          // Use a model capable of reading PDFs/Images
           const response = await ai.models.generateContent({
-            model: 'gemini-3-flash-preview',
-            contents: `Extract invoice details. Purchase or Sale? Party Name? Date? Total Grams? Rate? GST Rate? Text: ${ocrText}`,
+            model: 'gemini-2.0-flash-exp', // Powerful multimodal model for PDF/Images
+            contents: [
+                { 
+                    inlineData: { 
+                        mimeType: selectedFile.type, 
+                        data: base64Data 
+                    } 
+                },
+                { 
+                    text: `Analyze this invoice document carefully.
+                    Extract the following details in JSON format:
+                    - date: The invoice date (Format YYYY-MM-DD). If year is abbreviated (e.g. '26), assume 2026.
+                    - partyName: The name of the other party (Customer or Supplier). Note: If the document mentions "S.S.R BULLION" (me), do NOT pick that. Pick the OTHER entity name (e.g. Swarnadeep).
+                    - quantityGrams: The total weight/quantity of gold in grams (number).
+                    - ratePerGram: The rate per gram (number).
+                    - gstRate: The total GST percentage (number, usually 3).
+                    - type: 'SALE' or 'PURCHASE'. Logic: If "S.S.R BULLION" is the issuer/seller (at bottom or top header), it is a SALE. If "S.S.R BULLION" is the 'Billed to' party, it is a PURCHASE.
+                    
+                    Return ONLY the JSON.` 
+                }
+            ],
             config: {
                 responseMimeType: "application/json",
                 responseSchema: {
@@ -86,7 +119,9 @@ const InvoiceForm: React.FC<InvoiceFormProps> = ({ onAdd, currentStock, lockDate
                 }
             }
           });
+
           const data = JSON.parse(response.text || "{}");
+          
           if (data && data.partyName) {
                setFormData({
                   date: data.date || new Date().toISOString().split('T')[0],
@@ -96,27 +131,16 @@ const InvoiceForm: React.FC<InvoiceFormProps> = ({ onAdd, currentStock, lockDate
                   ratePerGram: data.ratePerGram?.toString() || '',
                   gstRate: data.gstRate?.toString() || '3',
               });
-              setMode('MANUAL');
+              setMode('MANUAL'); // Switch to manual for review
               return;
           }
-          throw new Error("Empty data");
+          throw new Error("Could not extract structured data.");
       } catch (err) {
-          const result = parseInvoiceOCR(ocrText);
-          if (result) {
-              setFormData({
-                  ...formData,
-                  date: result.date || formData.date,
-                  partyName: result.partyName || formData.partyName,
-                  quantityGrams: result.quantity > 0 ? result.quantity.toString() : '',
-                  ratePerGram: result.rate > 0 ? result.rate.toString() : '',
-                  gstRate: result.gstRate ? result.gstRate.toString() : formData.gstRate,
-                  type: result.isSale ? 'SALE' : 'PURCHASE'
-              });
-              setMode('MANUAL'); 
-          } else {
-              setError('Could not extract data automatically. Please enter manually.');
-          }
-      } finally { setIsProcessing(false); }
+          console.error(err);
+          setError('AI Extraction Failed. Please enter details manually.');
+      } finally { 
+          setIsProcessing(false); 
+      }
   };
 
   const calculateTotals = () => {
@@ -153,8 +177,9 @@ const InvoiceForm: React.FC<InvoiceFormProps> = ({ onAdd, currentStock, lockDate
         totalAmount: total,
         createdAt: new Date().toISOString() // STRICT ORDERING: Capture timestamp
     });
+    // Reset form
     setFormData({ date: new Date().toISOString().split('T')[0], type: 'PURCHASE', partyName: '', quantityGrams: '', ratePerGram: '', gstRate: '3' });
-    setOcrText('');
+    setSelectedFile(null);
   };
 
   const handleUnlock = (e: React.FormEvent) => {
@@ -276,14 +301,44 @@ const InvoiceForm: React.FC<InvoiceFormProps> = ({ onAdd, currentStock, lockDate
                 
                 {mode === 'UPLOAD' ? (
                     <div className="space-y-4 animate-fade-in">
-                        <div className="border-2 border-dashed border-slate-200 rounded-2xl p-6 flex flex-col items-center justify-center hover:bg-slate-50 hover:border-gold-400 transition-all cursor-text relative group overflow-hidden min-h-[250px]">
-                            <div className="w-12 h-12 bg-slate-100 rounded-full flex items-center justify-center mb-3 text-slate-400 group-hover:scale-110 transition-transform"><ScanLine className="w-6 h-6" /></div>
-                            <p className="font-medium text-slate-900 text-center text-sm">Paste Invoice Text</p>
-                            <textarea className="absolute inset-0 opacity-0 cursor-text p-6 text-sm font-mono bg-transparent z-10" value={ocrText} onChange={(e) => setOcrText(e.target.value)} disabled={!isWorkingMode} />
-                            {ocrText && <div className="absolute inset-0 p-6 bg-slate-50 text-xs font-mono overflow-auto opacity-50 pointer-events-none whitespace-pre-wrap">{ocrText}</div>}
-                        </div>
-                        <button type="button" onClick={handleOcrProcess} disabled={!ocrText || isProcessing || !isWorkingMode} className="w-full bg-slate-900 text-white py-3.5 rounded-xl font-bold hover:bg-slate-800 disabled:opacity-50 flex items-center justify-center gap-2 shadow-lg shadow-slate-900/20 text-sm">
-                            {isProcessing ? <Loader2 className="w-4 h-4 animate-spin text-gold-400"/> : <Sparkles className="w-4 h-4 text-gold-400"/>} Process Invoice
+                        <label className="block border-2 border-dashed border-slate-200 rounded-2xl p-6 flex flex-col items-center justify-center hover:bg-slate-50 hover:border-gold-400 transition-all cursor-pointer relative group overflow-hidden min-h-[250px]">
+                            <input 
+                                type="file" 
+                                accept="application/pdf, image/*" 
+                                className="absolute inset-0 opacity-0 cursor-pointer"
+                                onChange={handleFileChange}
+                                disabled={!isWorkingMode || isProcessing}
+                            />
+                            {selectedFile ? (
+                                <div className="text-center z-10">
+                                    <div className="w-12 h-12 bg-green-50 rounded-full flex items-center justify-center mb-3 text-green-600 mx-auto"><FileText className="w-6 h-6" /></div>
+                                    <p className="font-bold text-slate-900 text-sm truncate max-w-[200px]">{selectedFile.name}</p>
+                                    <p className="text-xs text-slate-500 mt-1">{(selectedFile.size / 1024).toFixed(2)} KB</p>
+                                </div>
+                            ) : (
+                                <div className="text-center z-10">
+                                    <div className="w-12 h-12 bg-slate-100 rounded-full flex items-center justify-center mb-3 text-slate-400 group-hover:scale-110 transition-transform mx-auto"><UploadCloud className="w-6 h-6" /></div>
+                                    <p className="font-medium text-slate-900 text-sm">Click to Upload Invoice</p>
+                                    <p className="text-xs text-slate-400 mt-1">Supports PDF, JPG, PNG</p>
+                                </div>
+                            )}
+                        </label>
+
+                        <button 
+                            type="button" 
+                            onClick={handleOcrProcess} 
+                            disabled={!selectedFile || isProcessing || !isWorkingMode} 
+                            className="w-full bg-slate-900 text-white py-3.5 rounded-xl font-bold hover:bg-slate-800 disabled:opacity-50 flex items-center justify-center gap-2 shadow-lg shadow-slate-900/20 text-sm"
+                        >
+                            {isProcessing ? (
+                                <>
+                                    <Loader2 className="w-4 h-4 animate-spin text-gold-400"/> Processing Document...
+                                </>
+                            ) : (
+                                <>
+                                    <Sparkles className="w-4 h-4 text-gold-400"/> Extract Details
+                                </>
+                            )}
                         </button>
                     </div>
                 ) : (
